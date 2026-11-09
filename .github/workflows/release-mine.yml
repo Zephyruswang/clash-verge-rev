@@ -1,0 +1,176 @@
+name: Release Mine
+
+on:
+  schedule:
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream app release tag (default: latest)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  HUSKY: 0
+  NODE_OPTIONS: "--max_old_space_size=4096"
+
+jobs:
+  release:
+    name: Build Windows installer from upstream release
+    runs-on: windows-latest
+    steps:
+      - name: Resolve target release
+        id: target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          requested="${REQUESTED_TAG:-}"
+          if [ -n "$requested" ]; then
+            if [[ ! "$requested" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid tag: $requested" >&2
+              exit 1
+            fi
+            tag="$requested"
+          else
+            tag="$(gh api repos/clash-verge-rev/clash-verge-rev/releases/latest --jq .tag_name)"
+          fi
+          base="${tag#v}"
+          existing="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' || true)"
+          if [ "${{ github.event_name }}" = "schedule" ] && printf '%s\n' "$existing" | grep -qE "^${tag}-mine\.[0-9]+$"; then
+            echo "Release for $tag already exists; skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n=1
+          while printf '%s\n' "$existing" | grep -qx "${tag}-mine.${n}"; do
+            n=$((n + 1))
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${base}-mine.${n}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${tag}-mine.${n}" >> "$GITHUB_OUTPUT"
+          echo "Target: $tag -> ${tag}-mine.${n}"
+
+      - name: Clone app at upstream tag
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        env:
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
+        run: git clone --depth 1 --branch "$TARGET_TAG" https://github.com/clash-verge-rev/clash-verge-rev.git app
+
+      - name: Read pnpm version from upstream tag
+        id: pnpmver
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -oE '"packageManager": *"pnpm@[^"]+"' app/package.json | sed -E 's/.*pnpm@([^"]+)".*/\1/')"
+          if [ -z "$version" ]; then
+            echo "No packageManager field in app/package.json" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Clone service mainline
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        run: git clone --depth 1 --branch main-mine https://github.com/Zephyruswang/clash-verge-service-ipc.git service
+
+      - name: Verify service version compatibility
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_pin="$(grep -A6 'clash_verge_service_ipc =' app/src-tauri/Cargo.toml | grep -oE 'version = "[^"]+"' | head -1 | cut -d'"' -f2)"
+          svc_ver="$(grep -m1 '^version = "' service/Cargo.toml | cut -d'"' -f2)"
+          echo "app pins service-ipc: $app_pin; service fork: $svc_ver"
+          if [ -n "$app_pin" ] && [ "$app_pin" != "$svc_ver" ]; then
+            newest="$(printf '%s\n%s\n' "$app_pin" "$svc_ver" | sort -V | tail -1)"
+            if [ "$newest" = "$app_pin" ]; then
+              echo "Service fork ($svc_ver) is older than the app pin ($app_pin); sync main-mine first." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Setup Node
+        if: steps.target.outputs.skip != 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26.13.0"
+
+      - name: Setup pnpm
+        if: steps.target.outputs.skip != 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ steps.pnpmver.outputs.version }}
+          run_install: false
+
+      - name: Install app dependencies
+        if: steps.target.outputs.skip != 'true'
+        working-directory: app
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare runtime resources
+        if: steps.target.outputs.skip != 'true'
+        working-directory: app
+        shell: bash
+        run: pnpm run prebuild x86_64-pc-windows-msvc
+
+      - name: Install Rust toolchain
+        if: steps.target.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - name: Build patched service
+        if: steps.target.outputs.skip != 'true'
+        working-directory: service
+        shell: bash
+        run: cargo build --release --features "standalone client"
+
+      - name: Bundle patched service
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in clash-verge-service.exe clash-verge-service-install.exe clash-verge-service-uninstall.exe; do
+            cp "service/target/release/$f" "app/src-tauri/resources/$f"
+          done
+          sha256sum app/src-tauri/resources/clash-verge-service.exe
+
+      - name: Build Windows installer
+        if: steps.target.outputs.skip != 'true'
+        working-directory: app
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          cfg="$RUNNER_TEMP/tauri-mine.json"
+          printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false}}' "$APP_VERSION" > "$cfg"
+          pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis --config "$cfg"
+
+      - name: Create prerelease
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
+          APP_VERSION: ${{ steps.target.outputs.version }}
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          setup="$(ls app/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | head -1)"
+          (cd app && sha256sum "target/x86_64-pc-windows-msvc/release/bundle/nsis/$(basename "$setup")" > "$RUNNER_TEMP/SHA256SUMS.txt")
+          gh release create "$RELEASE_TAG" "$setup" "$RUNNER_TEMP/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Clash Verge $APP_VERSION (Windows)" \
+            --prerelease \
+            --notes "Fork build of upstream $TARGET_TAG with the provider-cache fix. Windows x64 only. Unsigned; Windows SmartScreen may warn."
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
