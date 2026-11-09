@@ -182,15 +182,21 @@ jobs:
           set -euo pipefail
           bundle="app/target/x86_64-pc-windows-msvc/release/bundle/nsis"
           setup="$(ls "$bundle"/*-setup.exe | head -1)"
-          sig="${setup}.sig"
+          # GitHub stores release assets with spaces replaced by dots, so normalize the file name
+          # locally and build the updater URL from the same name to keep them in sync.
+          name="$(basename "$setup" | tr ' ' '.')"
+          cp "$setup" "$RUNNER_TEMP/$name"
+          cp "${setup}.sig" "$RUNNER_TEMP/$name.sig"
+          setup="$RUNNER_TEMP/$name"
+          sig="$setup.sig"
           test -f "$sig"
-          (cd app && sha256sum "target/x86_64-pc-windows-msvc/release/bundle/nsis/$(basename "$setup")" > "$RUNNER_TEMP/SHA256SUMS.txt")
+          (cd "$RUNNER_TEMP" && sha256sum "$name" > SHA256SUMS.txt)
           gh release create "$RELEASE_TAG" "$setup" "$sig" "$RUNNER_TEMP/SHA256SUMS.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Clash Verge $APP_VERSION (Windows)" \
             --prerelease \
             --notes "Fork build of upstream $TARGET_TAG with the provider-cache fix. Windows x64 only. Unsigned; Windows SmartScreen may warn."
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$(basename "$setup")"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$name"
           pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           jq -n --arg version "$APP_VERSION" --arg url "$url" --arg signature "$(cat "$sig")" --arg pub_date "$pub_date" --arg notes "Fork build of upstream $TARGET_TAG with the provider-cache fix." \
             '{version:$version, notes:$notes, pub_date:$pub_date, platforms:{"windows-x86_64":{signature:$signature, url:$url}}}' \
