@@ -40,21 +40,26 @@ jobs:
             tag="$(gh api repos/clash-verge-rev/clash-verge-rev/releases/latest --jq .tag_name)"
           fi
           base="${tag#v}"
+          major="${base%%.*}"
+          rest="${base#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+          fork_base="${major}.${minor}.$((patch + 1))"
           existing="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' || true)"
-          if [ "${{ github.event_name }}" = "schedule" ] && printf '%s\n' "$existing" | grep -qE "^${tag}-mine\.[0-9]+$"; then
+          if [ "${{ github.event_name }}" = "schedule" ] && printf '%s\n' "$existing" | grep -qE "^v${fork_base}-mine\.[0-9]+$"; then
             echo "Release for $tag already exists; skipping."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           n=1
-          while printf '%s\n' "$existing" | grep -qx "${tag}-mine.${n}"; do
+          while printf '%s\n' "$existing" | grep -qx "v${fork_base}-mine.${n}"; do
             n=$((n + 1))
           done
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${base}-mine.${n}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${tag}-mine.${n}" >> "$GITHUB_OUTPUT"
-          echo "Target: $tag -> ${tag}-mine.${n}"
+          echo "version=${fork_base}-mine.${n}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=v${fork_base}-mine.${n}" >> "$GITHUB_OUTPUT"
+          echo "Target: $tag -> v${fork_base}-mine.${n}"
 
       - name: Clone app at upstream tag
         if: steps.target.outputs.skip != 'true'
@@ -150,10 +155,19 @@ jobs:
         shell: bash
         env:
           APP_VERSION: ${{ steps.target.outputs.version }}
+          UPDATER_PUBKEY: "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI5RjQ3M0YxQjExMzI1MDIKUldRQ0pST3g4WFAwS1doWkxnMm92L1g1MzRRRjQ2anBuMGE1U2lRbnNwbGlnSE54czgxSEZZN1oK"
+          UPDATER_ENDPOINT: "https://github.com/Zephyruswang/clash-verge-rev/releases/download/updater/update.json"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          cfg="$RUNNER_TEMP/tauri-mine.json"
-          printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false}}' "$APP_VERSION" > "$cfg"
+          cfg="src-tauri/tauri.mine.conf.json"
+          jq --arg version "$APP_VERSION" --arg pubkey "$UPDATER_PUBKEY" --arg endpoint "$UPDATER_ENDPOINT" \
+            '.version = $version
+             | .bundle.createUpdaterArtifacts = true
+             | .plugins.updater.pubkey = $pubkey
+             | .plugins.updater.endpoints = [$endpoint]' \
+            src-tauri/tauri.conf.json > "$cfg"
           pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis --config "$cfg"
 
       - name: Create prerelease
@@ -166,11 +180,25 @@ jobs:
           TARGET_TAG: ${{ steps.target.outputs.tag }}
         run: |
           set -euo pipefail
-          setup="$(ls app/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | head -1)"
+          bundle="app/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          setup="$(ls "$bundle"/*-setup.exe | head -1)"
+          sig="${setup}.sig"
+          test -f "$sig"
           (cd app && sha256sum "target/x86_64-pc-windows-msvc/release/bundle/nsis/$(basename "$setup")" > "$RUNNER_TEMP/SHA256SUMS.txt")
-          gh release create "$RELEASE_TAG" "$setup" "$RUNNER_TEMP/SHA256SUMS.txt" \
+          gh release create "$RELEASE_TAG" "$setup" "$sig" "$RUNNER_TEMP/SHA256SUMS.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Clash Verge $APP_VERSION (Windows)" \
             --prerelease \
             --notes "Fork build of upstream $TARGET_TAG with the provider-cache fix. Windows x64 only. Unsigned; Windows SmartScreen may warn."
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$(basename "$setup")"
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n --arg version "$APP_VERSION" --arg url "$url" --arg signature "$(cat "$sig")" --arg pub_date "$pub_date" --arg notes "Fork build of upstream $TARGET_TAG with the provider-cache fix." \
+            '{version:$version, notes:$notes, pub_date:$pub_date, platforms:{"windows-x86_64":{signature:$signature, url:$url}}}' \
+            > "$RUNNER_TEMP/update.json"
+          if gh release view updater --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload updater "$RUNNER_TEMP/update.json" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create updater "$RUNNER_TEMP/update.json" --repo "$GITHUB_REPOSITORY" --title "updater" --notes "Fork updater channel" --prerelease
+          fi
           echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "Updater JSON: https://github.com/$GITHUB_REPOSITORY/releases/download/updater/update.json" >> "$GITHUB_STEP_SUMMARY"
