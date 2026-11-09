@@ -128,6 +128,7 @@ pub async fn get_proxy_view() -> CmdResult<ProxyViewV1> {
 #[tauri::command]
 #[specta::specta]
 pub async fn sync_tray_proxy_selection() -> CmdResult<()> {
+    crate::core::tray::health::invalidate();
     if TRAY_SYNC_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
