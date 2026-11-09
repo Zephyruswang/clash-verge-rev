@@ -81,6 +81,18 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Stamp fork version
+        if: steps.target.outputs.skip != 'true'
+        working-directory: app
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          jq --arg version "$APP_VERSION" '.version = $version' package.json > package.json.tmp
+          mv package.json.tmp package.json
+          echo "package.json version: $(jq -r .version package.json)"
+
       - name: Clone service mainline
         if: steps.target.outputs.skip != 'true'
         shell: bash
