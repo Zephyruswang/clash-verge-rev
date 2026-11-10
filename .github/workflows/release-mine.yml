@@ -261,7 +261,7 @@ jobs:
             src-tauri/tauri.conf.json > "$cfg"
           pnpm exec tauri build --target x86_64-pc-windows-msvc --bundles nsis --config "$cfg"
 
-      - name: Create prerelease
+      - name: Create release
         if: steps.target.outputs.skip != 'true'
         shell: bash
         env:
@@ -354,20 +354,31 @@ jobs:
               echo "_Not available (upstream $TARGET_TAG has no published release yet)._"
             fi
           } >> "$RUNNER_TEMP/notes.md"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            # Scheduled runs follow an upstream stable release: publish as formal and refresh the updater channel.
+            release_kind="--latest"
+            update_channel=true
+          else
+            # Manual runs are test builds: keep them as prereleases and leave the updater channel untouched.
+            release_kind="--prerelease"
+            update_channel=false
+          fi
           gh release create "$RELEASE_TAG" "$setup" "$sig" "$RUNNER_TEMP/SHA256SUMS.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Clash Verge $APP_VERSION (Windows)" \
-            --prerelease \
+            $release_kind \
             --notes-file "$RUNNER_TEMP/notes.md"
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$name"
-          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          jq -n --arg version "$APP_VERSION" --arg url "$url" --arg signature "$(cat "$sig")" --arg pub_date "$pub_date" --arg notes "Fork build of upstream $TARGET_TAG with the provider-cache fix." \
-            '{version:$version, notes:$notes, pub_date:$pub_date, platforms:{"windows-x86_64":{signature:$signature, url:$url}}}' \
-            > "$RUNNER_TEMP/update.json"
-          if gh release view updater --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload updater "$RUNNER_TEMP/update.json" --clobber --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create updater "$RUNNER_TEMP/update.json" --repo "$GITHUB_REPOSITORY" --title "updater" --notes "Fork updater channel" --prerelease
+          if [ "$update_channel" = true ]; then
+            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$name"
+            pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            jq -n --arg version "$APP_VERSION" --arg url "$url" --arg signature "$(cat "$sig")" --arg pub_date "$pub_date" --arg notes "Fork build of upstream $TARGET_TAG with the provider-cache fix." \
+              '{version:$version, notes:$notes, pub_date:$pub_date, platforms:{"windows-x86_64":{signature:$signature, url:$url}}}' \
+              > "$RUNNER_TEMP/update.json"
+            if gh release view updater --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload updater "$RUNNER_TEMP/update.json" --clobber --repo "$GITHUB_REPOSITORY"
+            else
+              gh release create updater "$RUNNER_TEMP/update.json" --repo "$GITHUB_REPOSITORY" --title "updater" --notes "Fork updater channel" --prerelease
+            fi
+            echo "Updater JSON: https://github.com/$GITHUB_REPOSITORY/releases/download/updater/update.json" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
-          echo "Updater JSON: https://github.com/$GITHUB_REPOSITORY/releases/download/updater/update.json" >> "$GITHUB_STEP_SUMMARY"
