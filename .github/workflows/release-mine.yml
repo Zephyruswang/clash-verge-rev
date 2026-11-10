@@ -2,7 +2,7 @@ name: Release Mine
 
 on:
   schedule:
-    - cron: "0 23 * * *"
+    - cron: "7 23 * * *"
   workflow_dispatch:
     inputs:
       tag:
