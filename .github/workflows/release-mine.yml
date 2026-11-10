@@ -155,7 +155,11 @@ jobs:
       - name: Clone service mainline
         if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt != 'true'
         shell: bash
-        run: git clone --depth 1 --branch main-mine https://github.com/Zephyruswang/clash-verge-service-ipc.git service
+        run: |
+          git clone --depth 1 --branch main-mine https://github.com/Zephyruswang/clash-verge-service-ipc.git service
+          # The fork checkout at the workspace root is a Cargo workspace; keep the
+          # standalone service crate out of it.
+          printf '\n[workspace]\n' >> service/Cargo.toml
 
       - name: Verify service version compatibility
         if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt != 'true'
