@@ -184,6 +184,9 @@ jobs:
         uses: pnpm/action-setup@v6
         with:
           version: ${{ steps.pnpmver.outputs.version }}
+          # The workspace root holds the fork checkout (whose pnpm version may be
+          # newer than the upstream release tag); read the app clone instead.
+          package_json_file: app/package.json
           run_install: false
 
       - name: Install app dependencies
