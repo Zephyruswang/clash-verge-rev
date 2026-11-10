@@ -1,0 +1,62 @@
+name: Promote Mine
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Fork release tag to promote (e.g. v2.5.11-mine.3)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote prerelease to formal and refresh the updater channel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-mine\.[0-9]+$ ]]; then
+            echo "Invalid tag: $TAG" >&2
+            exit 1
+          fi
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")" || {
+            echo "Release $TAG not found" >&2
+            exit 1
+          }
+          echo "Release $TAG prerelease=$(printf '%s' "$release_json" | jq -r '.prerelease')"
+          setup_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select(.name | endswith("x64-setup.exe")) | .browser_download_url' | head -1)"
+          sig_url="$(printf '%s' "$release_json" | jq -r '.assets[] | select(.name | endswith("x64-setup.exe.sig")) | .browser_download_url' | head -1)"
+          if [ -z "$setup_url" ] || [ -z "$sig_url" ]; then
+            echo "Missing installer or signature asset on $TAG" >&2
+            exit 1
+          fi
+          signature="$(curl -sL --max-time 60 "$sig_url")"
+          version="${TAG#v}"
+          body="$(printf '%s' "$release_json" | jq -r '.body // empty')"
+          base="$(printf '%s' "$body" | grep -oE 'upstream (clash-verge-rev )?v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | sed -E 's/^upstream (clash-verge-rev )?//' || true)"
+          if [ -n "$base" ]; then
+            notes="Fork build of upstream $base with the provider-cache fix."
+          else
+            notes="Fork build of the dev-mine branch with the provider-cache fix."
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n --arg version "$version" --arg url "$setup_url" --arg signature "$signature" --arg pub_date "$pub_date" --arg notes "$notes" \
+            '{version:$version, notes:$notes, pub_date:$pub_date, platforms:{"windows-x86_64":{signature:$signature, url:$url}}}' \
+            > "$RUNNER_TEMP/update.json"
+          if gh release view updater --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload updater "$RUNNER_TEMP/update.json" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create updater "$RUNNER_TEMP/update.json" --repo "$GITHUB_REPOSITORY" --title "updater" --notes "Fork updater channel" --prerelease
+          fi
+          {
+            echo "Promoted $TAG to a formal release."
+            echo "Updater JSON: https://github.com/$GITHUB_REPOSITORY/releases/download/updater/update.json"
+          } >> "$GITHUB_STEP_SUMMARY"
