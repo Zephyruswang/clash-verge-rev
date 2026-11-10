@@ -61,6 +61,13 @@ jobs:
           echo "release_tag=v${fork_base}-mine.${n}" >> "$GITHUB_OUTPUT"
           echo "Target: $tag -> v${fork_base}-mine.${n}"
 
+      - name: Checkout fork repository
+        if: steps.target.outputs.skip != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: dev-mine
+          fetch-depth: 0
+
       - name: Clone app at upstream tag
         if: steps.target.outputs.skip != 'true'
         shell: bash
@@ -275,11 +282,83 @@ jobs:
           sig="$setup.sig"
           test -f "$sig"
           (cd "$RUNNER_TEMP" && sha256sum "$name" > SHA256SUMS.txt)
+          sha="$(cut -d' ' -f1 "$RUNNER_TEMP/SHA256SUMS.txt")"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Patched Windows x64 build of the fork's \`dev-mine\` branch.
+
+          - **Base:** upstream clash-verge-rev $TARGET_TAG
+          - **Patch:** service mode keeps the last successfully downloaded remote proxy-provider cache when a refresh fails (bundled from the fork's clash-verge-service-ipc build)
+          - **Commit:** \`$GITHUB_SHA\`
+          - **Version rule:** upstream patch+1 + \`-mine.N\` (upstream $TARGET_TAG -> $APP_VERSION)
+
+          **Assets**
+
+          - \`$name\` - Windows x64 NSIS installer (unsigned; Windows SmartScreen may warn)
+          - \`$name.sig\` - updater signature
+          - \`SHA256SUMS.txt\`
+
+          Installer SHA256: \`$sha\`
+
+          **Updater channel:** https://github.com/$GITHUB_REPOSITORY/releases/download/updater/update.json
+          EOF
+          prev_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*-mine.*' HEAD 2>/dev/null || true)"
+          commit_dir="$RUNNER_TEMP/fork-commits"
+          mkdir -p "$commit_dir"
+          if [ -n "$prev_tag" ]; then
+            git log --no-merges --pretty=tformat:'%h%x09%s' "$prev_tag..HEAD" | while IFS=$'\t' read -r csha csubject; do
+              [ -z "$csha" ] && continue
+              case "$csubject" in
+                "ci: sync"*) continue ;;
+                fix*) type=fix ;;
+                feat*) type=feat ;;
+                ci*) type=ci ;;
+                docs*) type=docs ;;
+                chore*) type=chore ;;
+                refactor*) type=refactor ;;
+                perf*) type=perf ;;
+                test*) type=test ;;
+                build*) type=build ;;
+                *) type=other ;;
+              esac
+              printf -- '- `%s` %s\n' "$csha" "$csubject" >> "$commit_dir/$type"
+            done
+            if ls "$commit_dir"/* >/dev/null 2>&1; then
+              {
+                echo ""
+                echo "**Fork commits since $prev_tag**"
+                echo ""
+                for pair in "feat:Features" "fix:Fixes" "refactor:Refactors" "perf:Performance" "build:Build" "ci:CI" "docs:Docs" "test:Tests" "chore:Chores" "other:Other"; do
+                  f="$commit_dir/${pair%%:*}"
+                  if [ -s "$f" ]; then
+                    echo "**${pair#*:}**"
+                    echo ""
+                    cat "$f"
+                    echo ""
+                  fi
+                done
+              } >> "$RUNNER_TEMP/notes.md"
+            fi
+          fi
+          upstream_notes="$(gh api "repos/clash-verge-rev/clash-verge-rev/releases/tags/$TARGET_TAG" --jq '.body // empty' 2>/dev/null || true)"
+          {
+            echo ""
+            echo "**Upstream release notes ($TARGET_TAG)**"
+            echo ""
+            if [ -n "$upstream_notes" ]; then
+              echo "<details><summary>Expand</summary>"
+              echo ""
+              printf '%s\n' "$upstream_notes"
+              echo ""
+              echo "</details>"
+            else
+              echo "_Not available (upstream $TARGET_TAG has no published release yet)._"
+            fi
+          } >> "$RUNNER_TEMP/notes.md"
           gh release create "$RELEASE_TAG" "$setup" "$sig" "$RUNNER_TEMP/SHA256SUMS.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Clash Verge $APP_VERSION (Windows)" \
             --prerelease \
-            --notes "Fork build of upstream $TARGET_TAG with the provider-cache fix. Windows x64 only. Unsigned; Windows SmartScreen may warn."
+            --notes-file "$RUNNER_TEMP/notes.md"
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$name"
           pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           jq -n --arg version "$APP_VERSION" --arg url "$url" --arg signature "$(cat "$sig")" --arg pub_date "$pub_date" --arg notes "Fork build of upstream $TARGET_TAG with the provider-cache fix." \
