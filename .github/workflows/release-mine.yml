@@ -80,6 +80,20 @@ jobs:
           TARGET_TAG: ${{ steps.target.outputs.tag }}
         run: git clone --depth 1 --branch "$TARGET_TAG" https://github.com/clash-verge-rev/clash-verge-rev.git app
 
+      - name: Apply fork source fixes
+        if: steps.target.outputs.skip != 'true'
+        shell: bash
+        env:
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Fork-only source fixes live on release-fixes, rebased onto each upstream tag.
+          git -C app fetch --depth 20 https://github.com/Zephyruswang/clash-verge-rev.git release-fixes
+          if ! git -C app merge --ff-only FETCH_HEAD; then
+            echo "release-fixes is not based on $TARGET_TAG; rebase it onto that tag first." >&2
+            exit 1
+          fi
+
       - name: Read pnpm version from upstream tag
         id: pnpmver
         if: steps.target.outputs.skip != 'true'
