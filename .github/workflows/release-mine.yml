@@ -52,8 +52,13 @@ jobs:
             exit 0
           fi
           n=1
-          while printf '%s\n' "$existing" | grep -qx "v${fork_base}-mine.${n}"; do
-            n=$((n + 1))
+          for t in $existing; do
+            if [[ "$t" =~ ^v${fork_base}-mine\.([0-9]+)$ ]]; then
+              idx="${BASH_REMATCH[1]}"
+              if [ "$idx" -ge "$n" ]; then
+                n=$((idx + 1))
+              fi
+            fi
           done
           echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
