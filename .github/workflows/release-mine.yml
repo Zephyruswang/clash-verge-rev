@@ -93,13 +93,65 @@ jobs:
           mv package.json.tmp package.json
           echo "package.json version: $(jq -r .version package.json)"
 
-      - name: Clone service mainline
+      - name: Resolve patched service release
+        id: patched
         if: steps.target.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVICE_REPO: Zephyruswang/clash-verge-service-ipc
+        run: |
+          set -euo pipefail
+          app_pin="$(grep -A6 'clash_verge_service_ipc =' app/src-tauri/Cargo.toml | grep -oE 'version = "[^"]+"' | head -1 | cut -d'"' -f2)"
+          if [ -z "$app_pin" ]; then
+            echo "Cannot read clash_verge_service_ipc version pin" >&2
+            exit 1
+          fi
+          major="${app_pin%%.*}"
+          rest="${app_pin#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+          svc_base="${major}.${minor}.$((patch + 1))"
+          head_sha="$(gh api "repos/$SERVICE_REPO/branches/main-mine" --jq '.commit.sha')"
+          existing="$(gh release list --repo "$SERVICE_REPO" --limit 200 --json tagName --jq '.[].tagName' || true)"
+          best=""
+          best_n=0
+          for t in $existing; do
+            if [[ "$t" =~ ^v${svc_base}-mine\.([0-9]+)$ ]]; then
+              idx="${BASH_REMATCH[1]}"
+              if [ "$idx" -gt "$best_n" ]; then
+                best="$t"
+                best_n="$idx"
+              fi
+            fi
+          done
+          use=false
+          if [ -n "$best" ]; then
+            obj="$(gh api "repos/$SERVICE_REPO/git/ref/tags/$best" 2>/dev/null || true)"
+            obj_type="$(printf '%s' "$obj" | jq -r '.object.type // empty' 2>/dev/null || true)"
+            sha="$(printf '%s' "$obj" | jq -r '.object.sha // empty' 2>/dev/null || true)"
+            if [ "$obj_type" = "tag" ] && [ -n "$sha" ]; then
+              sha="$(gh api "repos/$SERVICE_REPO/git/tags/$sha" --jq '.object.sha' 2>/dev/null || true)"
+            fi
+            if [ "$sha" = "$head_sha" ]; then
+              use=true
+              echo "Using prebuilt $best (main-mine $sha)"
+            else
+              echo "Latest $best was built from ${sha:-unknown}, main-mine is $head_sha; building from source instead."
+            fi
+          else
+            echo "No v${svc_base}-mine.N release found; building from source."
+          fi
+          echo "use_prebuilt=$use" >> "$GITHUB_OUTPUT"
+          echo "tag=$best" >> "$GITHUB_OUTPUT"
+
+      - name: Clone service mainline
+        if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt != 'true'
         shell: bash
         run: git clone --depth 1 --branch main-mine https://github.com/Zephyruswang/clash-verge-service-ipc.git service
 
       - name: Verify service version compatibility
-        if: steps.target.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -146,13 +198,13 @@ jobs:
           toolchain: "1.99.1"
 
       - name: Build patched service
-        if: steps.target.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt != 'true'
         working-directory: service
         shell: bash
         run: cargo build --release --features "standalone client"
 
       - name: Bundle patched service
-        if: steps.target.outputs.skip != 'true'
+        if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -160,6 +212,26 @@ jobs:
             cp "service/target/release/$f" "app/src-tauri/resources/$f"
           done
           sha256sum app/src-tauri/resources/clash-verge-service.exe
+
+      - name: Download patched service
+        if: steps.target.outputs.skip != 'true' && steps.patched.outputs.use_prebuilt == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVICE_REPO: Zephyruswang/clash-verge-service-ipc
+          TAG: ${{ steps.patched.outputs.tag }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "patched-service"
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          gh release download $env:TAG --repo $env:SERVICE_REPO --pattern "*-x86_64-pc-windows-msvc.zip" --dir $dir --clobber
+          $zip = (Get-ChildItem -Path $dir -Filter *.zip | Select-Object -First 1).FullName
+          if (-not $zip) { throw "No service archive downloaded for $env:TAG" }
+          $extract = Join-Path $dir "extract"
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+          foreach ($f in @("clash-verge-service.exe", "clash-verge-service-install.exe", "clash-verge-service-uninstall.exe")) {
+            Copy-Item -LiteralPath (Join-Path $extract $f) -Destination "app/src-tauri/resources/$f" -Force
+          }
+          Get-FileHash -Algorithm SHA256 "app/src-tauri/resources/clash-verge-service.exe" | Format-List
 
       - name: Build Windows installer
         if: steps.target.outputs.skip != 'true'
