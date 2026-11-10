@@ -345,6 +345,8 @@ jobs:
             echo "**Upstream release notes ($TARGET_TAG)**"
             echo ""
             if [ -n "$upstream_notes" ]; then
+              echo "> The links below point to the original repository's official builds, which do not include this fork's patch. Download the fork build from the assets of this release."
+              echo ""
               echo "<details><summary>Expand</summary>"
               echo ""
               printf '%s\n' "$upstream_notes"
